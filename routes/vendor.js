@@ -180,7 +180,7 @@ router.get('/licenses', async (req, res) => {
 
 
 // 🔹 APPLY RENEWAL
-router.post('/apply-renew/:licenseNumber', async (req, res) => {
+router.post('/apply-renewal/:licenseNumber', async (req, res) => {
   try {
     const licenseResult = await pool.query(
       'SELECT * FROM licenses WHERE license_number=$1 AND vendor_id=$2',
