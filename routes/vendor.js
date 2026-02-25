@@ -6,6 +6,7 @@ const generateApplicationNumber = require('../utils/applicationGenerator');
 const generateLicensePDF = require('../utils/licensePdfGenerator');
 const generateApplicationPDF = require('../utils/applicationPdfGenerator');
 const isEligibleForRenewal = require('../utils/renewalCheck');
+const { verifyToken, verifyRole } = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
@@ -18,7 +19,7 @@ router.post('/register', async (req, res) => {
     const { name, email, password } = req.body;
 
     const existing = await pool.query(
-      'SELECT * FROM vendors WHERE email=$1',
+      'SELECT * FROM vendor WHERE email=$1',
       [email]
     );
 
@@ -28,11 +29,14 @@ router.post('/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const result = await pool.query(
-      'INSERT INTO vendors (name,email,password) VALUES ($1,$2,$3) RETURNING id,name,email',
+      'INSERT INTO vendor (name,email,password) VALUES ($1,$2,$3) RETURNING id,name,email',
       [name, email, hashedPassword]
     );
 
-    res.status(201).json({ message: "Vendor registered", vendor: result.rows[0] });
+    res.status(201).json({
+      message: "Vendor registered successfully",
+      vendor: result.rows[0]
+    });
 
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -46,7 +50,7 @@ router.post('/login', async (req, res) => {
     const { email, password } = req.body;
 
     const result = await pool.query(
-      'SELECT * FROM vendors WHERE email=$1',
+      'SELECT * FROM vendor WHERE email=$1',
       [email]
     );
 
@@ -66,7 +70,10 @@ router.post('/login', async (req, res) => {
       { expiresIn: '1h' }
     );
 
-    res.json({ message: "Vendor login successful", token });
+    res.json({
+      message: "Vendor login successful",
+      token
+    });
 
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -74,13 +81,16 @@ router.post('/login', async (req, res) => {
 });
 
 
-// ================= APPLICATION =================
+// ================= PROTECTED ROUTES =================
 
-// 🔹 Apply Fresh
+// Apply middleware to everything below
+router.use(verifyToken, verifyRole('vendor'));
+
+
+// 🔹 APPLY FRESH APPLICATION
 router.post('/apply', async (req, res) => {
   try {
     const {
-      vendor_id,
       station_id,
       authorized_name,
       authorized_phone,
@@ -105,10 +115,18 @@ router.post('/apply', async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING *`,
       [
-        applicationNumber, vendor_id, station_id,
-        authorized_name, authorized_phone, authorized_address,
-        pan_no, gst_no, aadhar_no,
-        platform_no, shop_size_sqft, shop_category,
+        applicationNumber,
+        req.user.id, // from token
+        station_id,
+        authorized_name,
+        authorized_phone,
+        authorized_address,
+        pan_no,
+        gst_no,
+        aadhar_no,
+        platform_no,
+        shop_size_sqft,
+        shop_category,
         'fresh'
       ]
     );
@@ -121,39 +139,56 @@ router.post('/apply', async (req, res) => {
 });
 
 
-// 🔹 View Applications
-router.get('/applications/:vendorId', async (req, res) => {
-  const result = await pool.query(
-    'SELECT * FROM applications WHERE vendor_id=$1',
-    [req.params.vendorId]
-  );
-  res.json(result.rows);
+// 🔹 VIEW MY APPLICATIONS
+router.get('/applications', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM applications WHERE vendor_id=$1 ORDER BY applied_at DESC',
+      [req.user.id]
+    );
+
+    res.json(result.rows);
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 
-// 🔹 View Licenses (with expiry check)
-router.get('/licenses/:vendorId', async (req, res) => {
-  const result = await pool.query(
-    'SELECT * FROM licenses WHERE vendor_id=$1',
-    [req.params.vendorId]
-  );
+// 🔹 VIEW MY LICENSES
+router.get('/licenses', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM licenses WHERE vendor_id=$1',
+      [req.user.id]
+    );
 
-  const updated = result.rows.map(l => {
-    if (new Date() > l.valid_to) l.status = 'expired';
-    return l;
-  });
+    // Expiry check
+    const updated = result.rows.map(l => {
+      if (new Date() > l.valid_to) {
+        l.status = 'expired';
+      }
+      return l;
+    });
 
-  res.json(updated);
+    res.json(updated);
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 
-// 🔹 Apply Renewal
+// 🔹 APPLY RENEWAL
 router.post('/renew/:licenseNumber', async (req, res) => {
   try {
     const licenseResult = await pool.query(
-      'SELECT * FROM licenses WHERE license_number=$1',
-      [req.params.licenseNumber]
+      'SELECT * FROM licenses WHERE license_number=$1 AND vendor_id=$2',
+      [req.params.licenseNumber, req.user.id]
     );
+
+    if (licenseResult.rows.length === 0)
+      return res.status(404).json({ message: "License not found" });
 
     const license = licenseResult.rows[0];
 
@@ -172,7 +207,7 @@ router.post('/renew/:licenseNumber', async (req, res) => {
        RETURNING *`,
       [
         applicationNumber,
-        license.vendor_id,
+        req.user.id,
         license.station_id,
         'renewal',
         license.license_number,
@@ -188,17 +223,22 @@ router.post('/renew/:licenseNumber', async (req, res) => {
 });
 
 
-// 🔹 Download License PDF
+// 🔹 DOWNLOAD LICENSE PDF
 router.get('/download-license/:licenseNumber', async (req, res) => {
-  const result = await pool.query(
-    'SELECT * FROM licenses WHERE license_number=$1',
-    [req.params.licenseNumber]
-  );
+  try {
+    const result = await pool.query(
+      'SELECT * FROM licenses WHERE license_number=$1 AND vendor_id=$2',
+      [req.params.licenseNumber, req.user.id]
+    );
 
-  if (result.rows.length === 0)
-    return res.status(404).json({ message: "License not found" });
+    if (result.rows.length === 0)
+      return res.status(404).json({ message: "License not found" });
 
-  await generateLicensePDF(res, result.rows[0]);
+    await generateLicensePDF(res, result.rows[0]);
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 
@@ -209,15 +249,12 @@ router.get('/download-application/:applicationNumber', async (req, res) => {
       `SELECT a.*, s.station_name
        FROM applications a
        JOIN stations s ON a.station_id = s.id
-       WHERE a.application_number=$1`,
-      [req.params.applicationNumber]
+       WHERE a.application_number=$1 AND a.vendor_id=$2`,
+      [req.params.applicationNumber, req.user.id]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        message: "Application not found"
-      });
-    }
+    if (result.rows.length === 0)
+      return res.status(404).json({ message: "Application not found" });
 
     await generateApplicationPDF(res, result.rows[0]);
 
