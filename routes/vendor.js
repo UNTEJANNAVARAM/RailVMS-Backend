@@ -88,7 +88,7 @@ router.use(verifyToken, verifyRole('vendor'));
 
 
 // 🔹 APPLY FRESH APPLICATION
-router.post('/apply', async (req, res) => {
+router.post('/apply-fresh', async (req, res) => {
   try {
     const {
       station_id,
@@ -180,7 +180,7 @@ router.get('/licenses', async (req, res) => {
 
 
 // 🔹 APPLY RENEWAL
-router.post('/renew/:licenseNumber', async (req, res) => {
+router.post('/apply-renew/:licenseNumber', async (req, res) => {
   try {
     const licenseResult = await pool.query(
       'SELECT * FROM licenses WHERE license_number=$1 AND vendor_id=$2',
